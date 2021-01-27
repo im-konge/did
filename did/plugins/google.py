@@ -157,20 +157,6 @@ class Event(object):
         return False
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#  Google Tasks
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-class GoogleTasks(object):
-    """ Google Tasks functions """
-    def __init__(self, http):
-        self.service = discovery.build("tasks", "v1", http=http)
-
-    def tasks(self, **kwargs):
-        """ Fetch tasks specified criteria """
-        tasks_result = self.service.tasks().list(**kwargs).execute()
-        return [Task(task) for task in tasks_result.get("items", [])]
-
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #  Task
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -202,7 +188,6 @@ class GoogleStatsBase(Stats):
         except AttributeError:
             log.debug("Failed to initialize time range, skipping")
         self._events = None
-        self._tasks = None
 
     @property
     def events(self):
@@ -212,16 +197,6 @@ class GoogleStatsBase(Stats):
                 calendarId="primary", singleEvents=True, orderBy="startTime",
                 timeMin=self.since, timeMax=self.until)
         return self._events
-
-    @property
-    def tasks(self):
-        """ All completed tasks within specified time range """
-        if self._tasks is None:
-            self._tasks = self.parent.tasks.tasks(
-                tasklist="@default", showCompleted="true", showHidden="true",
-                completedMin=self.since, completedMax=self.until)
-        log.info("NB TASKS {0}".format(len(self._tasks)))
-        return self._tasks
 
 class GoogleEventsOrganized(GoogleStatsBase):
     """ Events organized """
@@ -240,12 +215,6 @@ class GoogleEventsAttended(GoogleStatsBase):
             event for event in self.events
             if event.attended_by(self.user.email)
             ]
-
-class GoogleTasksCompleted(GoogleStatsBase):
-    """ Tasks completed """
-    def fetch(self):
-        log.info("Searching for completed tasks by {0}".format(self.user))
-        self.stats = self.tasks
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #  Google Stats Group
@@ -270,13 +239,10 @@ class GoogleStatsGroup(StatsGroup):
 
         http = authorized_http(client_id, client_secret, apps, storage)
         self.calendar = GoogleCalendar(http)
-        self.tasks = GoogleTasks(http)
 
         self.stats = [
             GoogleEventsOrganized(
                 option=option + "-events-organized", parent=self),
             GoogleEventsAttended(
-                option=option + "-events-attended", parent=self),
-            GoogleTasksCompleted(
-                option=option + "-tasks-completed", parent=self),
+                option=option + "-events-attended", parent=self)
             ]

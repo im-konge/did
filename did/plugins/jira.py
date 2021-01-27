@@ -6,51 +6,39 @@ Configuration example (GSS authentication)::
 
     [jboss]
     type = jira
+    prefix = JIRA
+    project = ORG
     url = https://issues.jboss.org/
     ssl_verify = true
 
-Configuration example (basic authentication) with alternative username
-and custom prefix::
+Configuration example (basic authentication)::
 
     [jboss]
     type = jira
     prefix = JIRA
-    login = alt_username
+    project = ORG
     url = https://issues.jboss.org/
     auth_url = https://issues.jboss.org/rest/auth/latest/session
     auth_type = basic
     auth_username = username
     auth_password = password
-    auth_password_file = ~/.did/jira_password
-
-Configuration example limiting report only to a single project::
-
-    [jboss]
-    type = jira
-    project = ORG
-    url = https://issues.jboss.org/
-    ssl_verify = true
 
 Notes:
-* If your JIRA does not have scriptrunner installed you must set
-  ``use_scriptrunner`` to false.
-* You must provide ``login`` variable that matches username if it
-  doesn't match email/JIRA account.
 * Optional parameter ``ssl_verify`` can be used to enable/disable
-  SSL verification (default: true).
+  SSL verification (default: true)
 * ``auth_url`` parameter is optional. If not provided,
   ``url + "/step-auth-gss"`` will be used for authentication.
 * ``auth_type`` parameter is optional, default value is 'gss'.
-* ``auth_username``, ``auth_password`` and ``auth_password_file`` are
-  only valid for basic authentication, ``auth_password`` or
-  ``auth_password_file`` must be provided, ``auth_password`` has a
-  higher priority.
+* ``auth_username`` and ``auth_password`` are only valid for
+  basic authentication.
 """
 
-import os
+from __future__ import absolute_import, unicode_literals
+
 import re
+import urllib
+import urllib2
 import requests
-import urllib.parse
 import dateutil.parser
 import distutils.util
 from requests_gssapi import HTTPSPNEGOAuth, DISABLED
@@ -76,7 +64,6 @@ SSL_VERIFY = True
 #  Issue Investigator
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-
 class Issue(object):
     """ Jira issue investigator """
 
@@ -95,14 +82,10 @@ class Issue(object):
         else:
             self.prefix = matched.groups()[0]
 
-    def __str__(self):
+    def __unicode__(self):
         """ Jira key and summary for displaying """
         return "{0}-{1} - {2}".format(
             self.prefix, self.identifier, self.summary)
-
-    def __eq__(self, other):
-        """ Compare issues by key """
-        return self.key == other.key
 
     @staticmethod
     def search(query, stats):
@@ -113,7 +96,7 @@ class Issue(object):
         for batch in range(MAX_BATCHES):
             response = stats.parent.session.get(
                 "{0}/rest/api/latest/search?{1}".format(
-                    stats.parent.url, urllib.parse.urlencode({
+                    stats.parent.url, urllib.urlencode({
                         "jql": query,
                         "fields": "summary,comment",
                         "maxResults": MAX_RESULTS,
@@ -153,12 +136,10 @@ class JiraCreated(Stats):
         log.info("Searching for issues created in {0} by {1}".format(
             self.parent.project, self.user))
         query = (
-            "creator = '{0}' AND "
-            "created >= {1} AND created <= {2}".format(
-                self.user.email,
+            "project = '{0}' AND creator = '{1}' AND "
+            "created >= {2} AND created <= {3}".format(
+                self.parent.project, self.user.email,
                 self.options.since, self.options.until))
-        if self.parent.project:
-            query = query + " AND project = '{0}'".format(self.parent.project)
         self.stats = Issue.search(query, stats=self)
 
 
@@ -167,26 +148,15 @@ class JiraUpdated(Stats):
     def fetch(self):
         log.info("Searching for issues updated in {0} by {1}".format(
             self.parent.project, self.user))
-        if self.parent.use_scriptrunner:
-            query = (
-                "issueFunction in commented"
-                "('by {0} after {1} before {2}')".format(
-                    self.parent.login or self.user.login,
-                    self.options.since, self.options.until))
-            if self.parent.project:
-                query = query + " AND project = '{0}'".format(
-                        self.parent.project)
-            self.stats = Issue.search(query, stats=self)
-        else:
-            query = (
-                "project = '{0}' AND "
-                "updated >= {1} AND created <= {2}".format(
-                    self.parent.project, self.options.since,
-                    self.options.until))
-            # Filter only issues commented by given user
-            self.stats = [
-                issue for issue in Issue.search(query, stats=self)
-                if issue.updated(self.user, self.options)]
+        query = (
+            "project = '{0}' AND "
+            "updated >= {1} AND created <= {2}".format(
+                self.parent.project,
+                self.options.since, self.options.until))
+        # Filter only issues commented by given user
+        self.stats = [
+            issue for issue in Issue.search(query, stats=self)
+            if issue.updated(self.user, self.options)]
 
 
 class JiraResolved(Stats):
@@ -195,13 +165,10 @@ class JiraResolved(Stats):
         log.info("Searching for issues resolved in {0} by {1}".format(
             self.parent.project, self.user))
         query = (
-            "assignee = '{0}' AND "
-            "resolved >= {1} AND resolved <= {2}".format(
-                self.user.email,
+            "project = '{0}' AND (assignee = '{1}' OR tester = '{1}') AND "
+            "resolved >= {2} AND resolved <= {3}".format(
+                self.parent.project, self.user.email,
                 self.options.since, self.options.until))
-        if self.parent.project:
-            query = query + " AND project = '{0}'".format(
-                    self.parent.project)
         self.stats = Issue.search(query, stats=self)
 
 
@@ -245,25 +212,20 @@ class JiraStats(StatsGroup):
                     "`auth_username` not set in the [{0}] section"
                     .format(option))
             self.auth_username = config["auth_username"]
-            if "auth_password" in config:
-                self.auth_password = config["auth_password"]
-            elif "auth_password_file" in config:
-                file_path = os.path.expanduser(config["auth_password_file"])
-                with open(file_path) as password_file:
-                    self.auth_password = password_file.read().strip()
-            else:
+            if "auth_password" not in config:
                 raise ReportError(
-                    "`auth_password` or `auth_password_file` must be set "
-                    "in the [{0}] section".format(option))
+                    "`auth_password` not set in the [{0}] section"
+                    .format(option))
+            self.auth_password = config["auth_password"]
         else:
             if "auth_username" in config:
                 raise ReportError(
                     "`auth_username` is only valid for basic authentication"
                     + " (section [{0}])".format(option))
-            if "auth_password" in config or "auth_password_file" in config:
+            if "auth_password" in config:
                 raise ReportError(
-                    "`auth_password` and `auth_password_file` are only valid "
-                    "for basic authentication (section [{0}])".format(option))
+                    "`auth_password` is only valid for basic authentication"
+                    + " (section [{0}])".format(option))
         # SSL verification
         if "ssl_verify" in config:
             try:
@@ -276,19 +238,10 @@ class JiraStats(StatsGroup):
             self.ssl_verify = SSL_VERIFY
 
         # Make sure we have project set
-        self.project = config.get("project", None)
-        if "use_scriptrunner" in config:
-            self.use_scriptrunner = distutils.util.strtobool(
-                    config["use_scriptrunner"])
-        else:
-            self.use_scriptrunner = True
-
-        if not self.use_scriptrunner and not self.project:
+        if "project" not in config:
             raise ReportError(
-                "When scriptrunner is disabled with 'use_scriptrunner=False', "
-                "'project' has to be defined for each JIRA section.")
-        self.login = config.get("login", None)
-
+                "No project set in the [{0}] section".format(option))
+        self.project = config["project"]
         # Check for custom prefix
         self.prefix = config["prefix"] if "prefix" in config else None
         # Create the list of stats
